@@ -1,0 +1,848 @@
+/*
+ * Pgbank Analysis - Merged Network & Crypto Monitor
+ * Combined Features:
+ * 1. Network Request/Response Logging (from pgb copy 2.js)
+ * 2. Crypto Tracing (KeyGen, Cipher, HMAC)
+ */
+
+Java.perform(function() {
+    var StringClass = Java.use("java.lang.String");
+    var Base64 = Java.use("android.util.Base64");
+    var Charset = Java.use("java.nio.charset.Charset");
+    var utf8 = Charset.forName("UTF-8");
+    var ProxyClass = Java.use("java.lang.reflect.Proxy");
+    var ObjectClass = Java.use("java.lang.Object");
+
+    // ================== FORCE HTTP/1.1 (Java Side - Safer) ==================
+    try {
+        var OkBuilder = Java.use("okhttp3.OkHttpClient$Builder");
+        var Protocol = Java.use("okhttp3.Protocol");
+        var Arrays = Java.use("java.util.Arrays");
+        
+        OkBuilder.protocols.implementation = function(list) {
+            console.log("\n⚠️ [OkHttp] Force-Switching Protocol to HTTP/1.1 (Java-side)");
+            var newProtocols = Arrays.asList([Protocol.HTTP_1_1.value]); 
+            return this.protocols(newProtocols);
+        }
+        console.log("✅ Hooked OkHttpClient$Builder to force HTTP/1.1");
+    } catch(e) { 
+        console.log("[-] OkHttp Builder Hook Failed (or not used): " + e);
+    }
+
+    console.log("[*] Initializing Pgbank Comprehensive Monitor...");
+
+    // ================== UTILS ==================
+    function toHex(bytes) {
+        if (!bytes) return "null";
+        var hex = "";
+        for(var i=0; i<Math.min(bytes.length, 256); i++) {
+            var b = bytes[i] & 0xFF;
+            if (b < 16) hex += "0";
+            hex += b.toString(16);
+        }
+        return hex + (bytes.length > 256 ? "..." : "");
+    }
+
+    function toBase64(bytes) {
+        if (!bytes) return "null";
+        return Base64.encodeToString(bytes, 2); // NO_WRAP
+    }
+
+    function byteArrayToString(bytes) {
+        if (!bytes) return "null";
+        try {
+            var str = StringClass.$new(bytes, "UTF-8");
+            var readable = 0;
+            for(var i=0; i<Math.min(str.length(), 100); i++) {
+                var c = str.charCodeAt(i);
+                if ((c >= 32 && c <= 126) || c == 10 || c == 13) readable++;
+            }
+            if (readable / Math.min(str.length(), 100) > 0.8) return str.toString();
+        } catch(e) {}
+        return "[Binary Data]";
+    }
+
+    function inspectObject(obj, depth) {
+        if (depth === undefined) depth = 0;
+        if (depth > 3) return "..."; 
+        if (obj === null || obj === undefined) return "null";
+        try {
+            var javaObj = Java.cast(obj, ObjectClass);
+            var cls = javaObj.getClass();
+            var clsName = cls.getName();
+            return "[" + clsName + "]@" + javaObj.hashCode().toString(16);
+        } catch(e) { return "[Inspect Error]"; }
+    }
+
+    // ================== NETWORK HOOKS (From pgb copy 2.js) ==================
+
+    // 1. OkHttp Request Monitoring (o.a0 -> Request)
+    try {
+        var Client = Java.use("o.a0");
+        var clientMethods = Client.class.getDeclaredMethods();
+        clientMethods.forEach(function(m) {
+            var params = m.getParameterTypes();
+            if (params.length === 1) {
+                 var overloads = Client[m.getName()].overloads;
+                 overloads.forEach(function(ov) {
+                    ov.implementation = function(req) {
+                        try {
+                            var reqInfo = "";
+                            try { reqInfo = req.toString(); } catch(e) { reqInfo = "[Req Null]"; }
+                            console.log("\n[OkHttp Request] " + m.getName() + "(): " + reqInfo);
+                            
+                            // Attempt to print Request Headers explicitly
+                            try {
+                                if (req && req.headers) {
+                                    var headers = req.headers();
+                                    if (headers) console.log("  [Request Headers]:\n" + headers.toString());
+                                }
+                            } catch(eHeader) { }
+
+                            if (reqInfo.indexOf("Request") === -1 && reqInfo.indexOf("http") === -1) {
+                                 console.log("  [Request Dump]:\n" + inspectObject(req, 0));
+                            }
+                        } catch(e) { console.log("[Req Hook Error]: " + e); }
+
+                        // Execute Original Method
+                        var ret = this[m.getName()](req);
+                        
+                        // Attempt to capture Response Headers
+                        try {
+                            if (ret) {
+                                var respInfo = ret.toString();
+                                // Check if it looks like an OkHttp Response
+                                if (respInfo.indexOf("Response") !== -1 || respInfo.indexOf("code=") !== -1) {
+                                    console.log("\n[OkHttp Response] " + m.getName() + "(): " + respInfo);
+                                    if (ret.headers) {
+                                        var respHeaders = ret.headers();
+                                        if (respHeaders) console.log("  [Response Headers]:\n" + respHeaders.toString());
+                                    }
+                                }
+                            }
+                        } catch(eResp) { }
+                        
+                        return ret;
+                    }
+                });
+            }
+        });
+        console.log("[+] Hooked o.a0 (OkHttp Client)");
+    } catch(e) { console.log("[-] o.a0 Hook Error: " + e); }
+
+    // 2. Response Decompression (GZIP/Inflater - Captures Response Body)
+    function tryTraceDecompression(name) {
+        try {
+            var Clazz = Java.use(name);
+            var readMethods = Clazz.read.overloads;
+            readMethods.forEach(function(method) {
+                method.implementation = function() {
+                    var ret = method.apply(this, arguments);
+                    try {
+                        if (ret > 0 && arguments.length >= 1 && arguments[0] != null) {
+                            var buffer = arguments[0];
+                            var offset = (arguments.length >= 2) ? arguments[1] : 0;
+                            var length = ret; 
+                            var s = StringClass.$new(buffer, offset, length, utf8).toString();
+                            
+                            if(s.trim().startsWith("{") || s.trim().startsWith("[")) {
+                                console.log("\n⬇️ [BODY-DECODED] (" + name + "):\n" + s);
+                            }
+                        }
+                    } catch(e) {}
+                    return ret;
+                }
+            });
+        } catch(e) {}
+    }
+    tryTraceDecompression("java.util.zip.GZIPInputStream");
+    tryTraceDecompression("java.util.zip.InflaterInputStream");
+    
+    // Low-level Inflater hook
+    try {
+        var Inflater = Java.use("java.util.zip.Inflater");
+        Inflater.inflate.overload('[B', 'int', 'int').implementation = function(b, off, len) {
+            var ret = this.inflate(b, off, len);
+            if (ret > 0) {
+                try {
+                    var s = StringClass.$new(b, off, ret, utf8).toString();
+                    if(s.trim().startsWith("{") || s.trim().startsWith("[")) {
+                         console.log("\n⬇️ [BODY-DECODED] (Inflater):\n" + s);
+                    }
+                } catch(e) {}
+            }
+            return ret;
+        }
+    } catch(e) {}
+
+    // ================== CRYPTO HOOKS (Previously Added) ==================
+
+    // 1. KeyGenerator
+    try {
+        var KeyGenerator = Java.use("javax.crypto.KeyGenerator");
+        var SecretKey = Java.use("javax.crypto.SecretKey"); 
+
+        KeyGenerator.generateKey.implementation = function() {
+            var key = this.generateKey();
+            var algo = this.getAlgorithm();
+            console.log("\n🔑 [KeyGenerator] Generated " + algo + " Key");
+            try {
+                // Key extends java.security.Key which has getEncoded()
+                var KeyInterface = Java.use("java.security.Key");
+                var castKey = Java.cast(key, KeyInterface);
+                var encoded = castKey.getEncoded();
+                if (encoded) {
+                     console.log("   Key (Hex): " + toHex(encoded));
+                     console.log("   Key (Base64): " + toBase64(encoded));
+                     if (algo.toUpperCase().includes("AES")) console.log("   👉 POTENTIAL sessionDES (Plaintext) FOUND!");
+                }
+            } catch(e) { 
+                console.log("   [Key Inspect Error]: " + e);
+                // Fallback: try raw method call if cast fails
+                try {
+                    var encoded = key.getEncoded();
+                    if (encoded) console.log("   Key (Hex - fallback): " + toHex(encoded));
+                } catch(e2) {}
+            }
+            return key;
+        }
+    } catch(e) { console.log("KeyGen Hook Error: " + e); }
+
+    // 2. Cipher
+    try {
+        var Cipher = Java.use("javax.crypto.Cipher");
+        var cipherMap = new Map();
+
+        Cipher.init.overload('int', 'java.security.Key').implementation = function(mode, key) {
+             this.init(mode, key);
+             handleInit(this, mode, key, null);
+        }
+        Cipher.init.overload('int', 'java.security.Key', 'java.security.spec.AlgorithmParameterSpec').implementation = function(mode, key, spec) {
+             this.init(mode, key, spec);
+             handleInit(this, mode, key, spec);
+        }
+        Cipher.init.overload('int', 'java.security.Key', 'java.security.SecureRandom').implementation = function(mode, key, random) {
+             this.init(mode, key, random);
+             handleInit(this, mode, key, null);
+        }
+    
+        function handleInit(instance, mode, key, spec) {
+            var algo = instance.getAlgorithm();
+            var keyEncoded = (key && key.getEncoded()) ? key.getEncoded() : null;
+            var keyB64 = keyEncoded ? toBase64(keyEncoded) : "null";
+            var ivStr = "null";
+            try {
+                var iv = instance.getIV();
+                if (iv) ivStr = toHex(iv);
+            } catch(e) {}
+            
+            var modeStr = (mode === 1) ? "ENCRYPT" : (mode === 2) ? "DECRYPT" : "MODE_" + mode;
+            cipherMap.set(instance.hashCode(), { algo: algo, mode: modeStr, keyB64: keyB64, iv: ivStr });
+
+            if (algo.toUpperCase().includes("RSA")) {
+                console.log("\n⚙️ [Cipher Init] " + algo + " [" + modeStr + "]");
+                console.log("   Provider: " + instance.getProvider().getName());
+                
+                try {
+                    // Try to inspect RSA Key specifically
+                    var RSAPublicKey = Java.use("java.security.interfaces.RSAPublicKey");
+                    if (key) {
+                        var pubKey = Java.cast(key, RSAPublicKey);
+                        console.log("   RSA Modulus: " + pubKey.getModulus().toString(16));
+                        console.log("   RSA Exponent: " + pubKey.getPublicExponent().toString(16));
+                    }
+                } catch(e) { } // Ignore if not RSAPublicKey
+                
+                if (keyB64 !== "null") console.log("   Key (Base64 X.509): " + keyB64);
+
+            } else if (algo.toUpperCase().includes("AES")) {
+                console.log("\n⚙️ [Cipher Init] " + algo + " [" + modeStr + "]");
+            }
+        }
+
+        Cipher.doFinal.overload('[B').implementation = function(input) {
+            var ret = this.doFinal(input);
+            handleDoFinal(this, input, ret);
+            return ret;
+        }
+
+        function handleDoFinal(instance, input, output) {
+            var ctx = cipherMap.get(instance.hashCode());
+            if (!ctx) return; 
+
+            var algo = ctx.algo.toUpperCase();
+            var mode = ctx.mode;
+            
+            if (algo.includes("RSA") && mode === "ENCRYPT" && input.length < 256) {
+                console.log("\n🔐 [RSA Encryption] Potential sessionDES Encryption!");
+                console.log("   Input B64: " + toBase64(input));
+                console.log("   Output B64: " + toBase64(output));
+            }
+            
+            if (algo.includes("AES") && mode === "ENCRYPT") {
+                var inputStr = byteArrayToString(input);
+                console.log("\n📦 [AES Encryption] Potential reqBody Generation!");
+                
+                // Always print HEX for binary reliability
+                console.log("   Input (Hex): " + toHex(input));
+                
+                // Force Safe View if binary - FULL CONTENT
+                var safe = "";
+                for(var i=0; i<input.length; i++) {
+                    var c = input[i];
+                    if ((c >= 32 && c <= 126)) safe += String.fromCharCode(c);
+                    else safe += ".";
+                }
+                console.log("   Input (SafeView): " + safe);
+                
+                if (inputStr !== "[Binary Data]") {
+                    console.log("   Plaintext Body: " + inputStr);
+                }
+                
+                console.log("   Algo: " + algo + " | IV: " + ctx.iv);
+                console.log("   Key: " + ctx.keyB64);
+                console.log("   Output (reqBody Candidate): " + toBase64(output));
+            }
+        }
+    } catch(e) { console.log("Cipher Hook Error: " + e); }
+    
+    // ================== EXTENDED HASHING TRACER (HMAC & MessageDigest) ==================
+    
+    // ================== EXTENDED HASHING TRACER (HMAC & MessageDigest) ==================
+    
+    // Global Map for Digest Persistence (Fixes JS Wrapper loss)
+    var globalDigestData = {}; 
+
+    function appendData(instance, bytes) {
+        if (!bytes) return;
+        var id = instance.hashCode();
+        if (!globalDigestData[id]) globalDigestData[id] = [];
+        
+        // Convert input to simple JS number array to save memory/complexity
+        var arr = globalDigestData[id];
+        for(var i=0; i<bytes.length; i++) arr.push(bytes[i]);
+    }
+
+    function handleHashFinal(instance, type, output) {
+        var algo = "UNKNOWN";
+        try { algo = instance.getAlgorithm(); } catch(e){}
+        if (algo === "MD5") return;
+
+        var id = instance.hashCode();
+        var data = globalDigestData[id]; 
+        var outputHex = toHex(output);
+        var targetHash = "fea7d6fc4855a99eb5240765516cf506ebbcdae94b08ff70b14b2aefef219851";
+
+        if (data && data.length > 0) {
+            // OPTIMIZATION: Use Java StringBuilder for massive speed/memory improvement
+            var StringBuilder = Java.use("java.lang.StringBuilder");
+            var sb = StringBuilder.$new();
+            
+            // Build Hex String efficiently
+            for(var i=0; i<data.length; i++) {
+                 var c = data[i] & 0xFF;
+                 var h = c.toString(16);
+                 if (h.length < 2) sb.append("0");
+                 sb.append(h);
+            }
+            var fullHex = sb.toString();
+            var fullBytesLength = data.length;
+
+            var stack = Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Throwable").$new());
+
+            // 🚫 NOISE FILTER 🚫
+            if (stack.includes("JarVerifier") || 
+                stack.includes("SignatureFileVerifier") || 
+                stack.includes("ManifestDigester") || 
+                stack.includes("OkHttp")) { 
+                return; 
+            }
+
+            var isTarget = (outputHex.toLowerCase() === targetHash);
+            var isImage = (fullBytesLength > 5000 && algo.includes("SHA-256")); 
+
+            if (isTarget || isImage) {
+                 console.log("\n========================================================");
+                 if (isTarget) console.log("🎯🔥🔥 TARGET HASH DETECTED (" + algo + ") 🔥🔥");
+                 if (isImage)  console.log("📸 [Image Hashing] Large Input (" + fullBytesLength + " bytes)");
+                 
+                 console.log("   ID: " + id);
+                 console.log("   Result (Hex): " + outputHex);
+                 
+                 // HANDLING LARGE INPUTS TO PREVENT FREEZE
+                 if (fullBytesLength > 20000) { // > 20KB
+                     try {
+                         // Save to file instead of printing
+                         var fPath = "/sdcard/Download/hash_input_" + id + ".bin";
+                         var File = Java.use("java.io.File");
+                         var FileOutputStream = Java.use("java.io.FileOutputStream");
+                         
+                         var f = File.$new(fPath);
+                         var fos = FileOutputStream.$new(f);
+                         
+                         // Convert JS array to Java Byte Array inefficiently but safely? 
+                         // Or just loop write?
+                         // Ideally: var jArr = Java.array('byte', data); 
+                         // But data is JS array (numbers).
+                         // Let's create a Java byte array.
+                         var jArr = Java.array('byte', data);
+                         
+                         fos.write(jArr);
+                         fos.close();
+                         
+                         console.log("   ⚠️ [Performance] Input too huge to print.");
+                         console.log("   💾 Saved RAW input to: " + fPath);
+                         console.log("   Input (Hex Preview): " + fullHex.substring(0, 1024) + "...");
+                     } catch(e) {
+                         console.log("   [Save Failed]: " + e);
+                         console.log("   Input (Hex Preview): " + fullHex.substring(0, 1024) + "...");
+                     }
+                 } else {
+                     // Small enough to print safely
+                     console.log("   Input (Full Hex): " + fullHex);
+                 }
+                 
+                 console.log("   Stack Trace:\n" + stack);
+                 console.log("========================================================\n");
+            } else {
+                 console.log("\n#️⃣ [" + type + "-" + id + "] Algo: " + algo);
+                 // Print Hex for standard logs too (truncated)
+                 console.log("   Input (Hex): " + (fullHex.length>200?fullHex.substring(0,200)+"...":fullHex));
+                 console.log("   Result (Hex): " + outputHex);
+            }
+            delete globalDigestData[id]; // Reset after digest
+        } else {
+             // No data found in map (Maybe initialized via clone of empty? or missed hook?)
+             var stack = Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Throwable").$new());
+             if (outputHex.toLowerCase() === targetHash) {
+                 console.log("\n🎯🔥🔥 TARGET HASH DETECTED (No Input Captured) 🔥🔥");
+                 console.log("   Stack Trace:\n" + stack);
+             }
+        }
+    }
+
+    // ... Inside MessageDigest Hook ...
+    try {
+        var MessageDigest = Java.use("java.security.MessageDigest");
+        
+        // HOOK CLONE (Crucial for Salt propagation)
+        MessageDigest.clone.implementation = function() {
+            var oldId = this.hashCode();
+            var ret = this.clone();
+            if (ret && globalDigestData[oldId]) {
+                 var newId = ret.hashCode();
+                 // Deep copy data
+                 globalDigestData[newId] = globalDigestData[oldId].slice();
+                 console.log("👯 [Clone] Copied " + globalDigestData[oldId].length + " bytes from " + oldId + " to " + newId);
+            }
+            return ret;
+        }
+
+        MessageDigest.update.overload('byte').implementation = function(b) {
+            appendData(this, [b]);
+            this.update(b);
+        }
+        MessageDigest.update.overload('[B').implementation = function(b) {
+            appendData(this, b);
+            this.update(b);
+        }
+        MessageDigest.update.overload('[B', 'int', 'int').implementation = function(b, off, len) {
+            var slice = [];
+            for(var i=off; i<off+len; i++) slice.push(b[i]);
+            appendData(this, slice);
+            this.update(b, off, len);
+        }
+
+        // NEW: Handle ByteBuffer updates (Common source of 'hidden' data)
+        MessageDigest.update.overload('java.nio.ByteBuffer').implementation = function(buffer) {
+             // console.log("⚠️ [MessageDigest.update] ByteBuffer called!");
+             try {
+                 if (buffer.hasRemaining()) {
+                     var buf = buffer.duplicate();
+                     var len = Math.min(buf.remaining(), 2048); // Cap capture
+                     var arr = [];
+                     
+                     // Read bytes
+                     if (buf.hasArray()) {
+                         // Fast path
+                         var raw = buf.array();
+                         var offset = buf.arrayOffset() + buf.position();
+                         for(var i=0; i<len; i++) arr.push(raw[offset + i]);
+                     } else {
+                         // Direct buffer slow path
+                         for(var i=0; i<len; i++) arr.push(buf.get());
+                     }
+                     
+                     appendData(this, arr);
+                     if (buffer.remaining() > 2048) {
+                         // Mark truncation
+                         // appendData(this, ...); 
+                     }
+                 }
+             } catch(e) { console.log("ByteBuffer Capture Error: " + e); }
+             this.update(buffer);
+        }
+        
+        MessageDigest.digest.overload().implementation = function() {
+            var ret = this.digest();
+            handleHashFinal(this, "MD-" + this.getAlgorithm() + "-" + this.hashCode(), ret);
+            return ret;
+        }
+        
+        MessageDigest.digest.overload('[B').implementation = function(b) {
+            appendData(this, b);
+            var ret = this.digest(b);
+            handleHashFinal(this, "MD-" + this.getAlgorithm() + "-" + this.hashCode(), ret);
+            return ret;
+        }
+
+    } catch(e) { console.log("MessageDigest Hook Error: " + e); }
+
+    // 5. Target Static Method f.l.a.m.i.a (Possible Hash Function)
+    // ================== IMAGE TRAP ==================
+    // Hooks FileOutputStream to catch JPEG writes (Cache/Save)
+    try {
+        var FOS = Java.use("java.io.FileOutputStream");
+        var isSaving = false; // Prevent recursion when WE write the file
+
+        FOS.write.overload('[B', 'int', 'int').implementation = function(b, off, len) {
+            if (!isSaving && len > 5000 && b && b.length >= off+2) {
+                 // Check JPEG Magic: 0xFF 0xD8 (Java bytes are signed: -1, -40)
+                 if (b[off] == -1 && b[off+1] == -40) { 
+                     console.log("\n📸 [Image Trap] JPEG Write Detected (" + len + " bytes)");
+                     isSaving = true;
+                     try {
+                         var path = "/sdcard/Download/img_trap01_" + new Date().getTime() + ".jpg";
+                         // Use a separate stream to verify we don't trigger our own hook recurisvely 
+                         // (though 'isSaving' flag handles it)
+                         var f = Java.use("java.io.File").$new(path);
+                         var out = FOS.$new(f); 
+                         out.write(b, off, len);
+                         out.close();
+                         console.log("   ✅ Saved Copy to: " + path);
+                     } catch(e) { 
+                         console.log("   ❌ Trap Save Error: " + e); 
+                     }
+                     isSaving = false;
+                 }
+            }
+            this.write(b, off, len);
+        }
+        console.log("✅ Image Trap (FileOutputStream) Active");
+
+    } catch(e) { console.log("Image Trap Error: " + e); }
+        
+    // 5. Target Static Method f.l.a.m.i.a (Possible Hash Function)
+    try {
+        var HashUtils = Java.use("f.l.a.m.i");
+        console.log("\n🎯 Attaching to f.l.a.m.i...");
+        
+        // Iterate all overloads of 'a'
+        var methodA = HashUtils.a.overloads;
+        methodA.forEach(function(ov) {
+            ov.implementation = function() {
+                console.log("\n[f.l.a.m.i.a] Called with " + arguments.length + " args");
+                for(var i=0; i<arguments.length; i++) {
+                    var arg = arguments[i];
+                    var argStr = "null";
+                    if (arg !== null && arg !== undefined) {
+                         try { 
+                             // Try to stringify if it's a String
+                             argStr = arg.toString();
+                             // If it looks like a byte array, show hex/safeview
+                             var cls = Java.cast(arg, Java.use("java.lang.Object")).getClass().getName();
+                             if (cls === "[B") {
+                                 argStr = "[ByteArray] " + toBase64(arg); 
+                                 // Also try to convert to string if it looks like text
+                                 var safe = "";
+                                 for(var j=0; j<Math.min(arg.length, 500); j++) {
+                                     var c = arg[j];
+                                      if ((c >= 32 && c <= 126)) safe += String.fromCharCode(c);
+                                      else safe += ".";
+                                 }
+                                 console.log("   Arg["+i+"] (SafeView): " + safe);
+                             }
+                         } catch(e) { argStr = "[Object]"; }
+                    }
+                    console.log("   Arg[" + i + "]: " + argStr);
+                }
+                
+                var ret = this.a.apply(this, arguments);
+                if (ret !== undefined && ret !== null) {
+                     try { console.log("   Ret: " + ret.toString()); } catch(e){console.log(e)}
+                }
+                return ret;
+            }
+        });
+    } catch(e) { console.log("Hook f.l.a.m.i Error: " + e); }
+
+    // 6. OkHttp Header Analysis (Explicit Hooks)
+    // -----------------------------------------------------------------------
+    try {
+        var HeadersBuilder = Java.use("okhttp3.Headers$Builder");
+        var addHeader = HeadersBuilder.add.overload('java.lang.String', 'java.lang.String');
+        addHeader.implementation = function(name, value) {
+            // Log interesting headers
+            if (name.toLowerCase().includes("auth") || name.toLowerCase().includes("token")) {
+                console.log("\n➕ [Header Builder] Adding: " + name + " = " + value);
+            }
+            
+            // Trace SHA-256-Digest origin
+            if (name.toLowerCase() === "sha-256-digest") {
+                console.log("\n🎯 [Target Header] Found SHA-256-Digest!");
+                console.log("   Value: " + value);
+                console.log("   Stack Trace:\n" + Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Throwable").$new()));
+            }
+
+            return this.add(name, value);
+        }
+        console.log("✅ Hooked okhttp3.Headers$Builder (Monitoring 'Auth', 'Token', 'SHA-256-Digest')");
+    } catch(e) { 
+        // console.log("Header Builder hook failed: " + e); 
+    }
+
+    try {
+        var OkResponse = Java.use("okhttp3.Response");
+        if (OkResponse.headers) {
+            OkResponse.headers.implementation = function() {
+                var h = this.headers();
+                var str = h.toString();
+                // Always print response headers if they contain interesting fields
+                if (str.toLowerCase().includes("auth") || str.toLowerCase().includes("token")) {
+                     console.log("\n⬇️ [Response Headers (Interesting)]:\n" + str);
+                }
+                return h;
+            }
+        }
+    } catch(e) { }
+
+});
+
+
+Java.perform(function() {
+    // ================== MULTIPART & UPLOAD LOGIC HOOKS ==================
+    try {
+        var MultipartBuilder = Java.use("okhttp3.MultipartBody$Builder");
+        
+        // Hook addFormDataPart(String name, String value)
+        MultipartBuilder.addFormDataPart.overload('java.lang.String', 'java.lang.String').implementation = function(name, value) {
+            console.log("\n📝 [Multipart] Field: " + name + " = " + value);
+            return this.addFormDataPart(name, value);
+        }
+
+        // Hook addFormDataPart(String name, String filename, RequestBody body)
+        MultipartBuilder.addFormDataPart.overload('java.lang.String', 'java.lang.String', 'okhttp3.RequestBody').implementation = function(name, filename, body) {
+            console.log("\n📸 [Multipart] File Upload:");
+            console.log("   Field: " + name);
+            console.log("   Filename: " + filename);
+            try { console.log("   Body Type: " + body.getClass().getName()); } catch(e){}
+            return this.addFormDataPart(name, filename, body);
+        }
+        
+    } catch(e) { console.log("Multipart Hook Error: " + e); }
+
+    try {
+        var RequestBody = Java.use("okhttp3.RequestBody");
+        
+        // Hook create(MediaType contentType, File file)
+        RequestBody.create.overload('okhttp3.MediaType', 'java.io.File').implementation = function(type, file) {
+            console.log("\n📂 [RequestBody] Creating from File:");
+            console.log("   Type: " + type);
+            console.log("   File: " + file.getAbsolutePath());
+            console.log("   Size: " + file.length());
+            return this.create(type, file);
+        }
+
+        // Hook create(MediaType contentType, byte[] content)
+        RequestBody.create.overload('okhttp3.MediaType', '[B').implementation = function(type, content) {
+            console.log("\n💾 [RequestBody] Creating from Bytes:");
+            console.log("   Type: " + type);
+            console.log("   Size: " + content.length);
+            
+            // Try to print content if it's text
+            try {
+                var str = "";
+                for(var i=0; i<Math.min(content.length, 100); i++) str += String.fromCharCode(content[i]);
+                if (str.match(/^[a-zA-Z0-9{};:"'.,\-_ ]+$/)) {
+                    console.log("   Content: " + str);
+                }
+            } catch(e){}
+
+            return this.create(type, content);
+        }
+    } catch(e) { console.log("RequestBody Hook Error: " + e); }
+});
+
+    // ================== NATIVE SSL HOOKS ==================
+function hookSSL() {
+    console.log("[*] Starting Native SSL Hooks...");
+    if (!Module.findExportByName) {
+        Module.findExportByName = function (moduleName, exportName) {
+            if (moduleName === null) return Module.findGlobalExportByName(exportName);
+            const mod = Process.findModuleByName(moduleName);
+            if (mod === null) return null;
+            return mod.findExportByName(exportName);
+        };
+    }
+
+
+    const targetLibs = ["stable_cronet_libssl.so", "libssl.so", "libboringssl.so", "libmonochrome.so"];
+    
+    // Helper to force HTTP/1.1 by removing 'h2' from ALPN
+    function disableHTTP2(libName) {
+        function filterALPN(args) {
+            try {
+                var protos = args[1];
+                var len = args[2].toInt32();
+                var newProtos = [];
+                var p = 0;
+                var modified = false;
+
+                while (p < len) {
+                    var l = protos.add(p).readU8();
+                    var protocol = protos.add(p + 1).readUtf8String(l);
+                    
+                    if (protocol === 'h2') {
+                        modified = true;
+                    } else {
+                        newProtos.push(l);
+                        for (var i = 0; i < l; i++) {
+                            newProtos.push(protos.add(p + 1 + i).readU8());
+                        }
+                    }
+                    p += 1 + l;
+                }
+
+                if (modified) {
+                    console.log("\n🚫 [ALPN Force] Removing 'h2' from " + libName + " to enforce HTTP/1.1 (Readability)");
+                    var newPtr = Memory.alloc(newProtos.length);
+                    newPtr.writeByteArray(newProtos);
+                    args[1] = newPtr;
+                    args[2] = new NativePointer(newProtos.length);
+                }
+            } catch(e) { console.log("ALPN Filter Error: " + e); }
+        }
+
+        var funcCTX = Module.findExportByName(libName, "SSL_CTX_set_alpn_protos");
+        if (funcCTX) {
+            Interceptor.attach(funcCTX, { onEnter: function(args) { filterALPN(args); } });
+            console.log("   [+] Hooked SSL_CTX_set_alpn_protos (" + libName + ")");
+        }
+        
+        var funcSSL = Module.findExportByName(libName, "SSL_set_alpn_protos");
+        if (funcSSL) {
+             Interceptor.attach(funcSSL, { onEnter: function(args) { filterALPN(args); } });
+             console.log("   [+] Hooked SSL_set_alpn_protos (" + libName + ")");
+        }
+    }
+
+    targetLibs.forEach(function(libName) {
+        // disableHTTP2(libName); // ⚠️ Disabled Native ALPN Hook to prevent connection issues
+        const module = Process.findModuleByName(libName);
+
+        if (module) {
+            // SSL_write
+            const sslWrite = Module.findExportByName(libName, "SSL_write");
+            if (sslWrite) {
+                Interceptor.attach(sslWrite, {
+                    onEnter: function(args) {
+                        try {
+                            const len = args[2].toInt32();
+                            if (len > 0) {
+                                const ptr = args[1];
+                                var data = ptr.readByteArray(len);
+                                
+                                // Safe String Conversion (from h2.js)
+                                var safeStr = "";
+                                var u8arr = new Uint8Array(data);
+                                for(var i=0; i<Math.min(u8arr.length, 81920000); i++) {
+                                    var c = u8arr[i];
+                                    if( (c>=32 && c<=126) || c==10 || c==13 ) {
+                                        safeStr += String.fromCharCode(c);
+                                    } else {
+                                        safeStr += ".";
+                                    }
+                                }
+                                
+                                if (safeStr.indexOf("getTranSeqInput") !== -1) {
+                                    console.log("\n🚫 BLOCKED: getTranSeqInput detected! Dropping packet.");
+                                    args[2] = ptr(0);
+                                }
+
+                                if (safeStr.indexOf("liveness-face-matching") !== -1) {
+                                     console.log("\n📸 [Image Upload] liveness-face-matching detected!");
+                                     console.log(safeStr);
+                                }
+
+                                // 1. Scan for Method
+                                var methodMatch = safeStr.match(/(GET|POST|PUT|DELETE) \/.* HTTP/);
+                                if (methodMatch) {
+                                    console.log("\n🚀 [SSL Request Method] " + methodMatch[0]);
+                                }
+
+                                // 2. Scan for Authorization
+                                if (safeStr.match(/Authorization:/i) || safeStr.match(/Bearer /i)) {
+                                     console.log("\n🔑 [SSL Request] Authorization Header Detected!");
+                                     // Extract line
+                                     var lines = safeStr.split('\n');
+                                     for (var l of lines) {
+                                         if (l.match(/Authorization:/i) || l.match(/Bearer /i)) {
+                                             console.log("   👉 " + l.trim());
+                                         }
+                                     }
+                                }
+
+                                // Print Full Content if it looks like text OR contains known headers
+                                if (safeStr.includes("HTTP/") || methodMatch || safeStr.includes("{")) {
+                                    console.log("\n⬆️ [SSL Request Raw] (" + len + " bytes):\n" + safeStr);
+                                } else {
+                                    // Binary/Encrypted/H2 - Print Hex for analysis
+                                    // console.log(hexdump(data)); // Optional: uncomment if needed, but noisy
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                });
+            }
+
+            // SSL_read
+            const sslRead = Module.findExportByName(libName, "SSL_read");
+            if (sslRead) {
+                Interceptor.attach(sslRead, {
+                    onEnter: function(args) {
+                        this.buf = args[1];
+                    },
+                    onLeave: function(retval) {
+                        try {
+                            var len = retval.toInt32();
+                            if (len > 0 && this.buf) {
+                                var data = this.buf.readByteArray(len);
+                                
+                                // Safe String Conversion
+                                var safeStr = "";
+                                var u8arr = new Uint8Array(data);
+                                var textCount = 0;
+                                for(var i=0; i<Math.min(u8arr.length, 4096); i++) {
+                                    var c = u8arr[i];
+                                    if( (c>=32 && c<=126) || c==10 || c==13 ) {
+                                        safeStr += String.fromCharCode(c);
+                                        textCount++;
+                                    } else {
+                                        safeStr += ".";
+                                    }
+                                }
+                                
+                                // Relaxed Filter: Print if > 30% text OR standard headers
+                                if (textCount / len > 0.3 || safeStr.includes("HTTP/") || safeStr.includes("{")) {
+                                    console.log("\n⬇️ [SSL Response Raw] (" + len + " bytes):\n" + safeStr);
+                                }
+                            }
+                        } catch(e) {}
+                    }
+                });
+            }
+        }
+    });
+}
+
+setTimeout(hookSSL, 1000);

@@ -1,0 +1,563 @@
+// Java hook: must run inside Java.perform
+function hook_java_string() {
+    try {
+        console.log("Installing Java String hooks (Comprehensive)...");
+        var StringClass = Java.use("java.lang.String");
+        var Exception = Java.use("java.lang.Exception");
+        var Log = Java.use("android.util.Log");
+
+        // Helper to check and log
+        function checkAndLog(str, source) {
+            // Filter: 6 digits (OTP)
+            if (str && str.length === 6 && /^\d+$/.test(str)) {
+                console.log("\n[!] Possible OTP Found: " + str);
+                console.log("    Source: " + source);
+                try {
+                    var stack = Log.getStackTraceString(Exception.$new());
+                    console.log("    Stack Trace:\n" + stack);
+                } catch(e) {
+                    console.log("    Failed to get stack trace: " + e);
+                }
+            }
+        }
+
+        // 1. String(byte[], String charset)
+        try {
+            StringClass.$init.overload('[B', 'java.lang.String').implementation = function (bytes, charset) {
+                var result = this.$init(bytes, charset);
+                checkAndLog(result, "byte[], charset");
+                return result;
+            };
+        } catch(e) {}
+
+        // 2. String(byte[])
+        try {
+            StringClass.$init.overload('[B').implementation = function (bytes) {
+                var result = this.$init(bytes);
+                checkAndLog(result, "byte[]");
+                return result;
+            };
+        } catch(e) {}
+
+        // 3. String(char[])
+        try {
+            StringClass.$init.overload('[C').implementation = function (chars) {
+                var result = this.$init(chars);
+                checkAndLog(result, "char[]");
+                return result;
+            };
+        } catch(e) {}
+        
+        // 4. String(String) - Copy constructor
+        try {
+            StringClass.$init.overload('java.lang.String').implementation = function (original) {
+                var result = this.$init(original);
+                // checkAndLog(result, "String copy"); 
+                return result;
+            };
+        } catch(e) {}
+
+        // 5. CRITICAL: String(char[], int, int) - Used by StringBuilder.toString()
+        try {
+            StringClass.$init.overload('[C', 'int', 'int').implementation = function (chars, offset, count) {
+                var result = this.$init(chars, offset, count);
+                checkAndLog(result, "char[], int, int (StringBuilder?)");
+                return result;
+            };
+        } catch(e) {}
+
+        // 6. String(byte[], int, int, String charset)
+        try {
+            StringClass.$init.overload('[B', 'int', 'int', 'java.lang.String').implementation = function (bytes, offset, length, charset) {
+                var result = this.$init(bytes, offset, length, charset);
+                checkAndLog(result, "byte[], int, int, charset");
+                return result;
+            };
+        } catch(e) {}
+        
+        // 7. Monitor Integer.toString() as well
+        try {
+            var Integer = Java.use("java.lang.Integer");
+            Integer.toString.overload('int').implementation = function(i) {
+                var result = this.toString(i);
+                if (result.length === 6) { 
+                     checkAndLog(result, "Integer.toString");
+                }
+                return result;
+            };
+        } catch(e) {}
+
+        console.log("Java String hooks installed (Expanded coverage).");
+    } catch(e) {
+        console.log("Error in hook_java_string: " + e);
+    }
+
+    
+}
+
+function hook_hmac_final() {
+    // 使用 Process 代替 Module 查找，更健壮
+    const libcrypto = Process.findModuleByName("libcrypto.so") || Process.findModuleByName("libboringssl.so");
+
+    if (libcrypto) {
+        const hmacAddr = libcrypto.findExportByName("HMAC");
+        if (hmacAddr) {
+            Interceptor.attach(hmacAddr, {
+                onEnter: function (args) {
+                    console.log("[*] HMAC 入口被触发！来自模块: " + Process.findModuleByAddress(this.returnAddress).name);
+                    
+                    // 打印 Data 长度
+                    const dataLen = args[4].toInt32();
+                    console.log("[*] Data 长度: " + dataLen);
+                    
+                    // 打印 Data 的十六进制内容（这就是你计算失败的真相）
+                    console.log("[*] Data (HexDump):\n" + hexdump(args[3], { length: dataLen, ansi: true }));
+                }
+            });
+            console.log("[+] 成功 Hook HMAC 函数");
+        }
+    } else {
+        console.log("[-] 尚未发现 libcrypto.so，请先操作 App 触发加密动作");
+    }
+}
+
+// 建议设置一个延迟或者在 Java.perform 中调用
+setTimeout(hook_hmac_final, 1000);
+
+// Native hook: can run immediately
+function hook_native_crypto() {
+    try {
+        console.log("Installing Native Crypto hooks...");
+        
+        // Use Process.findExportByName as a safer alternative to Module.findExportByName
+        var memcpyAddr = Process.findExportByName(null, "memcpy");
+        if (memcpyAddr) {
+            Interceptor.attach(memcpyAddr, {
+                onEnter: function (args) {
+                    this.dest = args[0];
+                    this.len = args[2].toInt32();
+                },
+                onLeave: function (retval) {
+                    if (this.len === 6) { 
+                        try {
+                            var content = this.dest.readUtf8String(6);
+                            if (/^\d{6}$/.test(content)) {
+                                console.log("[Native memcpy] 6-digit string: " + content);
+                            }
+                        } catch (e) {}
+                    }
+                }
+            });
+            console.log("memcpy hook installed.");
+        } else {
+            console.log("memcpy export not found.");
+        }
+
+        var hmacPtr = Process.findExportByName(null, "HMAC"); 
+        if (hmacPtr) {
+            Interceptor.attach(hmacPtr, {
+                onEnter: function (args) {}
+            });
+            console.log("HMAC hook installed.");
+        }
+    } catch(e) {
+        console.log("Error in hook_native_crypto: " + e);
+    }
+}
+
+// Hook for OCRA generation
+function hook_ocra() {
+    Java.perform(function() {
+        try {
+            console.log("Attempting to hook vn.com.pvcombank.RNOcra.OCRAModule...");
+            var OCRAModule = Java.use("vn.com.pvcombank.RNOcra.OCRAModule");
+
+            // Hook generateOCRA
+            var overloads = OCRAModule.generateOCRA.overloads;
+            overloads.forEach(function(overload) {
+                overload.implementation = function() {
+                    console.log("\n[OCRA] generateOCRA called!");
+                    for (var i = 0; i < arguments.length; i++) {
+                        console.log("  Arg[" + i + "]: " + arguments[i]);
+                    }
+                    var result = this.generateOCRA.apply(this, arguments);
+                    console.log("  Result: " + result);
+                    return result;
+                };
+            });
+            console.log("Hooked generateOCRA (Java internal)");
+
+            // Hook OCRA_generateOCRA (Bridge method likely)
+            var overloads2 = OCRAModule.OCRA_generateOCRA.overloads;
+            overloads2.forEach(function(overload) {
+                overload.implementation = function() {
+                    console.log("\n[OCRA] OCRA_generateOCRA called (Bridge)!");
+                    for (var i = 0; i < arguments.length; i++) {
+                        console.log("  Arg[" + i + "]: " + arguments[i]);
+                    }
+                    var result = this.OCRA_generateOCRA.apply(this, arguments);
+                    console.log("  Result: " + result);
+                    return result;
+                };
+            });
+             console.log("Hooked OCRA_generateOCRA (Bridge)");
+
+        } catch(e) {
+            console.log("Error hooking OCRAModule: " + e);
+        }
+    });
+}
+
+// Call hooks
+hook_native_crypto();
+Java.perform(hook_java_string);
+hook_ocra();
+
+
+
+// 辅助函数：打印调用栈
+function showStackTrace() {
+    console.log(Java.use("android.util.Log").getStackTraceString(Java.use("java.lang.Exception").$new()));
+}
+
+const Color = { RESET: "\x1b[0m", GREEN: "\x1b[32m", YELLOW: "\x1b[33m", BLUE: "\x1b[34m" };
+
+
+// 添加一个全局的日志函数
+function log(message) {
+    try {
+        console.log("[BBL_DEBUG] " + message);
+        Java.perform(function() {
+            var Log = Java.use("android.util.Log");
+            Log.d("BBL_DEBUG", message);
+        });
+    } catch(e) {
+        console.log("[BBL_ERROR] Failed to log: " + e);
+    }
+}
+
+// 在脚本开始时输出标记
+log("=== BBL JSHook Script Started ===");
+// Java.perform(hook_crypto_outputs);
+// 添加错误处理
+try {
+    // Call hooks
+    hook_native_crypto();
+    Java.perform(hook_java_string);
+    Java.perform(function() {
+        
+        log("Script started");
+        var Buffer = Java.use('okio.Buffer');
+        // 检查进程名
+        var Process = Java.use("android.os.Process");
+        var currentPid = Process.myPid();
+        log("Current process ID: " + currentPid);
+
+        // 1. OkHttp
+        // Global set to track hooked Call classes to avoid re-hooking
+        var hookedCallClasses = new Set();
+        
+        // Helper to safe-read body from Buffer/Source
+        function readSource(source, byteCount) {
+             try {
+                if (!source) return "null source";
+                // Debug class name
+                // log("Source class: " + source.getClass().getName());
+
+                var BufferedSource = Java.use("okio.BufferedSource");
+                var bufferedSource = Java.cast(source, BufferedSource);
+                
+                // Try modern okio peek()
+                try {
+                    var peekSource = bufferedSource.peek();
+                    // Read up to byteCount bytes as ByteString
+                    var byteString = peekSource.readByteString(byteCount);
+                    return byteString.utf8();
+                } catch(peekErr) {
+                    // log("peek() failed (maybe old okio?), trying request+buffer: " + peekErr);
+                    
+                    // Fallback
+                    // Ensure byteCount is a long
+                    // bufferedSource.request(byteCount); // This expects long
+                    
+                    // Trying to just get buffer()
+                    var buffer = bufferedSource.buffer(); // Returns Buffer
+                    // Clone it safely?
+                    var clone = buffer.clone();
+                    // Read from clone. If buffer is huge, this might be partial?
+                    // clone is a deep copy of the buffer content
+                    return clone.readUtf8();
+                }
+             } catch(e) {
+                 return "Error reading source: " + e;
+             }
+        }
+
+        // Helper to inspect Response object
+        function inspectResponse(response) {
+            // try {
+                if (!response) return;
+                var request = response.request();
+                var url = request.url().toString();
+                
+                if (url.indexOf("trace-pvconnect.pvcombank.com.vn/v1/traces") !== -1) return;
+
+                log("========================================");
+                log("[Response] " + response.code() + " " + url);
+                console.log(response)
+                var body = response.body();
+                console.log("response body", body);
+                var headers = response.headers();
+                console.log("response headers", headers);
+                if(headers && headers.size() > 0) {
+                    for (var i = 0; i < headers.size(); i++) {
+                        try {
+                            if(headers.name(i) == "authorization") {
+                                log("[Response Header] " + headers.name(i) + ": " + headers.value(i));
+                            }
+                            
+                           
+                        } catch(e) {
+                            
+                        }
+                    }
+                }
+                if (body) {
+                //    try {
+                       // ResponseBody does not have writeTo(), only RequestBody does.
+                       // We must use source() to read ResponseBody.
+                       var source = body.source(); // returns BufferedSource
+                       
+                       // Explicit cast to ensure we call the interface method correctly
+                       var BufferedSource = Java.use("okio.BufferedSource");
+                       var castSource = Java.cast(source, BufferedSource);
+
+                       // Buffer the entire body (limit to 10MB to be safe)
+                       // You must pass a number (Frida handles long conversion)
+                       castSource.request(10 * 1024 * 1024); 
+                       
+                       var buffer = castSource.buffer(); // returns okio.Buffer
+                       
+                       // Clone the buffer so we don't consume the original response
+                       var OkioBuffer = Java.use("okio.Buffer");
+                       var castBuffer = Java.cast(buffer, OkioBuffer);
+                       var clone = castBuffer.clone();
+                       
+                       // IMPORTANT: clone() returns java.lang.Object (or standard clone return), 
+                       // we must cast the CLONE itself to use okio methods on it
+                       var castClone = Java.cast(clone, OkioBuffer);
+                       
+                       var bodyString = castClone.readUtf8();
+                       log("[Response Body]\n" + bodyString);
+                       log("[Response Body]\n" + bodyString);
+                //    } catch(e) {
+                //        log("[Response Body Error] " + e);
+                //    }
+                }
+            // } catch (e) {
+            //     log("Error inspecting response: " + e);
+            // }
+        }
+
+        // 1. OkHttp Dynamic Hooking
+        try {
+            var OkHttpClient = Java.use("okhttp3.OkHttpClient");
+            var newCall = OkHttpClient.newCall.overload('okhttp3.Request');
+            
+            newCall.implementation = function(request) {
+                try {
+                     var url = request.url().toString();
+                     // Filter
+                     if (url.indexOf("trace-pvconnect.pvcombank.com.vn/v1/traces") === -1) {
+                         log("========================================");
+                        //  log("[Request] " + request.method() + " " + url);
+                         
+                         // 1. Log Headers
+                         var headers = request.headers();
+                         if (headers && headers.size() > 0) {
+                             // Using standard iterator or checking size
+                             for (var i = 0; i < headers.size(); i++) {
+                                if(["x-api-key", "x-kony-app-key", "x-kony-app-secret", "client-id", "x-kony-reportingparams", "authorization", "device-id"].includes(headers.name(i))) {
+                                    log("  " + headers.name(i) + ": " + headers.value(i));
+                                }
+                                
+                                // "x-api-key": "64015b665c0acecb507e52e0c2f1ee01",
+                                // "x-kony-app-key": "64015b665c0acecb507e52e0c2f1ee01",
+                                // "x-kony-app-secret": "315f618073d863265b94c12ae2c861d6",
+                                // "client-id": "a35c6744e8fc1f0a8600256cf174415f",
+                                // "x-kony-reportingparams": "{\"os\":\"16\",\"dm\":\"\",\"did\":\"f1d180b1-0662-4754-8b0e-274df88c4d1d\",\"ua\":\"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:105.0) Gecko/20100101 Firefox/105.0\",\"aid\":\"OnlineBanking\",\"aname\":\"OnlineBanking\",\"chnl\":\"android\",\"plat\":\"web\",\"aver\":\"1.6.4\",\"atype\":\"spa\",\"stype\":\"b2c\",\"kuid\":\"1002496540\",\"mfaid\":\"fe14a445-ed8d-4cc7-927d-f6bd6c0a9fed\",\"mfbaseid\":\"1a8d7d3e-b78e-40a7-8f5d-340e20fda622\",\"mfaname\":\"DigitalBanking-Composite\",\"sdkversion\":\"9.5.0\",\"sdktype\":\"js\",\"fid\":\"frmLogin\",\"sessiontype\":\"I\",\"clientUUID\":\"1665464363240-dbb1-7c53-6cfe\",\"rsid\":\"1665464424417-5b28-7db2-783f\",\"svcid\":\"login_DbxKeycloakuserLogin\"}",
+                                // "authorization": "Basic NjQwMTViNjY1YzBhY2VjYjUwN2U1MmUwYzJmMWVlMDE6MzE1ZjYxODA3M2Q4NjMyNjViOTRjMTJhZTJjODYxZDY=",
+                                // "device-id": "f1d180b1-0662-4754-8b0e-274df88c4d1d"
+                             }
+                         }
+
+                         var body = request.body();
+                         if (body) {
+                             try {
+                                 var Buffer = Java.use("okio.Buffer");
+                                 var buffer = Buffer.$new();
+                                 body.writeTo(buffer);
+                                
+                                 var ByteString = Java.use("okio.ByteString");
+                                 var RequestBody = Java.use("okhttp3.RequestBody");
+                                 var MediaType = Java.use("okhttp3.MediaType");
+                                 
+                                 // Read content to ByteString (this consumes the buffer)
+                                 var contentByteString = buffer.readByteString();
+                                 var contentType = body.contentType();
+                                 
+                                 // 1. RECONSTRUCT THE REQUEST
+                                 // We must create a new body because 'body.writeTo' effectively consumed the original stream (if it was one-shot).
+                                 // Even if not one-shot, buffering it allows us to safely create a static copy.
+                                 var newBody = RequestBody.create(contentType, contentByteString);
+                                 
+                                 // 2. Rebuild Request
+                                 request = request.newBuilder()
+                                     .method(request.method(), newBody)
+                                     .build();
+                                     
+                                 // 3. LOGGING (using the captured content)
+                                 // Case 1: .txt PUT -> Binary Hex Dump
+                                 if (url.indexOf(".txt") !== -1 && request.method().toUpperCase() === "PUT") {
+                                    //   log("[Request Body] (.txt Binary) Hex:\n" + contentByteString.hex());
+                                 } 
+                                 // Case 2: .jpg -> Binary Base64
+                                 else if (url.indexOf(".jpg") !== -1) {
+                                    //  log("[Request Body] (.jpg Binary -> Base64):\n" + contentByteString.base64());
+                                 }
+                                 // Case 3: Default Text
+                                 else {
+                                     try {
+                                         // utf8() is a method of ByteString
+                                         log("[Request Body]\n" + contentByteString.utf8());
+                                     } catch(ex) {
+                                         log("[Request Body] (Not UTF8, logging Hex):\n" + contentByteString.hex());
+                                     }
+                                }
+                             } catch(e) {
+                                //  log("Err handling req body (reconstruction): " + e);
+                             }
+                         }
+                     }
+                } catch(e) { log("Err log req: " + e); }
+
+                var call = newCall.call(this, request);
+                
+                try {
+                    var className = call.$className;
+                    
+                    if (className && !hookedCallClasses.has(className)) {
+                        // log("Hooking Call class: " + className);
+                        hookedCallClasses.add(className);
+                        
+                        var CallImpl = Java.use(className);
+                        
+                        // Hook synchronous execute()
+                        try {
+                            var execute = CallImpl.execute.overload();
+                            execute.implementation = function() {
+                                var response = execute.call(this)
+                                // inspectResponse(response);
+                                log("get execute")
+                                return response;
+                            };
+                            log("Hooked execute() on " + className);
+                        } catch(e) { log("Failed hook execute: " + e); }
+
+                        // Hook asynchronous enqueue()
+                        try {
+                            var enqueue = CallImpl.enqueue.overload('okhttp3.Callback');
+                            
+                            // Create a unique wrapper class for this Call implementation
+                            var wrapperClassName = 'com.bbl.hook.CallbackWrapper_' + className.replace(/\./g, '_');
+                            var WrapperClass;
+                            try {
+                                WrapperClass = Java.use(wrapperClassName);
+                            } catch (e) {
+                                WrapperClass = Java.registerClass({
+                                    name: wrapperClassName,
+                                    implements: [Java.use('okhttp3.Callback')],
+                                    fields: { originalCallback: 'okhttp3.Callback' },
+                                    methods: {
+                                        onFailure: function(call, e) {
+                                            if (this.originalCallback.value) this.originalCallback.value.onFailure(call, e);
+                                        },
+                                        onResponse: function(call, response) {
+                                            inspectResponse(response);
+                                            if (this.originalCallback.value) this.originalCallback.value.onResponse(call, response);
+                                        }
+                                    }
+                                });
+                            }
+
+                            enqueue.implementation = function(callback) {
+                                var myCallback = WrapperClass.$new();
+                                myCallback.originalCallback.value = callback;
+                                enqueue.call(this, myCallback);
+                            };
+                            log("Hooked enqueue() on " + className);
+                        } catch(e) { log("Failed hook enqueue: " + e); }
+                    }
+                } catch(e) {
+                    log("Dynamic hook error: " + e);
+                }
+                
+                return call;
+            };
+            log("OkHttp dynamic (Request & Response) hooks installed");
+        } catch(e) {
+            log("OkHttp hook failed: " + e);
+        }
+
+     
+
+    
+
+        // 16. KeyStore Monitor
+        try {
+            var KeyStore = Java.use("java.security.KeyStore");
+            
+            // Hook load
+            var load = KeyStore.load.overload('java.security.KeyStore$LoadStoreParameter');
+            load.implementation = function(param) {
+                log("[KeyStore] loading...");
+                return load.call(this, param);
+            };
+
+            // Hook getEntry
+            var getEntry = KeyStore.getEntry.overload('java.lang.String', 'java.security.KeyStore$ProtectionParameter');
+            getEntry.implementation = function(alias, param) {
+                log("[KeyStore] getEntry: " + alias);
+                return getEntry.call(this, alias, param);
+            };
+
+            // Hook getKey
+            var getKey = KeyStore.getKey.overload('java.lang.String', '[C');
+            getKey.implementation = function(alias, password) {
+                log("[KeyStore] getKey: " + alias);
+                return getKey.call(this, alias, password);
+            };
+
+            // Hook aliases
+            var aliases = KeyStore.aliases.overload();
+            aliases.implementation = function() {
+                var result = aliases.call(this);
+                // log("[KeyStore] aliases called");
+                return result;
+            };
+
+            log("KeyStore hooks installed");
+        } catch(e) {
+            log("KeyStore hook failed: " + e);
+        }
+
+        // 心跳日志
+        setInterval(function() {
+            // log("Script is still running...");
+        }, 5000);
+
+        log("All hooks installed successfully");
+    });
+} catch(e) {
+    log("Fatal error in script: " + e);
+} 

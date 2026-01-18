@@ -5,21 +5,6 @@
  * 2. Crypto Tracing (KeyGen, Cipher, HMAC)
  */
 
-
-
-function log(message) {
-    try {
-        console.log("[BBL_DEBUG] " + message);
-        Java.perform(function() {
-            try {
-                var Log = Java.use("android.util.Log");
-                Log.d("BBL_DEBUG", message);
-            } catch(e) {}
-        });
-    } catch(e) { console.log("[BBL_ERROR] Failed to log: " + e); }
-}
-
-
 Java.perform(function() {
     var StringClass = Java.use("java.lang.String");
     var Base64 = Java.use("android.util.Base64");
@@ -27,75 +12,8 @@ Java.perform(function() {
     var utf8 = Charset.forName("UTF-8");
     var ProxyClass = Java.use("java.lang.reflect.Proxy");
     var ObjectClass = Java.use("java.lang.Object");
-    var CaptureInfo = {
-        "clientDeviceID": "",
-        "devicePubKey": "",
-        "deviceId": ""
-    };    
-    
+
     console.log("[*] Initializing Pgbank Comprehensive Monitor...");
-
-    console.log("[*] 🕵️‍♀️ 启动精准 Key 查找模式...");
-    console.log("    🎯 目标特征: 以 'DEV' 开头, 长度 39");
-
-    var foundSet = new Set();
-
-    function inspect(str, tag) {
-        if (!str) return;
-        // 核心过滤逻辑：DEV开头 且 长度39
-        if (str.length === 39 && str.indexOf("DEV") === 0) {
-            if (!foundSet.has(str)) {
-                foundSet.add(str);
-                console.log("\n================ [FOUND TARGET KEY] ================");
-                console.log("📍 来源: " + tag);
-                console.log("🔑 KEY : " + str);
-                if(str) {
-                    CaptureInfo['otpSecretKey'] = str;
-                }
-                console.log("==================================================\n");
-            }
-        }
-    }
-
-    // 1. 守株待兔：Hook Mac.init (Key 最终被使用的地方)
-    // 这是最精准的，因为它捕捉的是“正在用于加密”的那个 Key
-    try {
-        var Mac = Java.use("javax.crypto.Mac");
-        Mac.init.overload('java.security.Key').implementation = function(key) {
-            try {
-                var encoded = key.getEncoded();
-                if (encoded) {
-                    // byte[] -> string (ASCII)
-                    var s = "";
-                    for(var i=0; i<encoded.length; i++) s += String.fromCharCode(encoded[i]);
-                    inspect(s, "HMAC Init (Used)");
-                }
-            } catch(e) {}
-            return this.init(key);
-        }
-    } catch(e) { 
-        console.log("[-] Hook Mac 失败: " + e); 
-    }
-
-    // 2. 主动出击：Hook StringBuilder.toString (Key 被组装的地方)
-    // 很多时候 Key 是通过 append 拼接出来的，这里能捕捉到“刚出生”的 Key
-    try {
-        var StringBuilder = Java.use("java.lang.StringBuilder");
-        StringBuilder.toString.implementation = function() {
-            var s = this.toString(); // 调用原始方法
-            inspect(s, "StringBuilder.toString (Created)");
-            return s;
-        }
-    } catch(e) {
-        console.log("[-] Hook StringBuilder 失败: " + e);
-    }
-
-    
-
-    console.log("[*] 脚本已就绪。");
-    console.log("[*] 👉 方法一: 操作 App 进行 OTP 生成，观察控制台输出。");
-    console.log("[*] 👉 方法二: 在 Frida 控制台输入 findKey() 进行全内存扫描。");
-
 
     // ================== UTILS ==================
     function toHex(bytes) {
@@ -330,26 +248,7 @@ Java.perform(function() {
                     else safe += ".";
                 }
                 console.log("   Input (SafeView): " + safe);
-                try {
-                    var jsonSave = JSON.parse(safe);
-                    if(jsonSave['clientDeviceID']) CaptureInfo['clientDeviceID'] = jsonSave['clientDeviceID'];
-                    if(jsonSave['devicePubKey']) CaptureInfo['devicePubKey'] = jsonSave['devicePubKey'];
-                    if(jsonSave['deviceId']) CaptureInfo['deviceId'] = jsonSave['deviceId'];
-
-                    
-                    if(jsonSave['TMK']) {
-                        CaptureInfo['TMK'] = jsonSave['TMK'];
-                    }
-                    if(jsonSave['userID']) {
-                        CaptureInfo['userID'] = jsonSave['userID'];
-                    }
-                    if(jsonSave['phone_no']) {
-                        CaptureInfo['phone_no'] = jsonSave['phone_no'];
-                    }
-                    console.log("update capture", JSON.stringify(CaptureInfo, null, 4));
-                }catch(e) {
-                    console.log(e);
-                }
+                
                 if (inputStr !== "[Binary Data]") {
                     console.log("   Plaintext Body: " + inputStr);
                 }
@@ -533,11 +432,6 @@ Java.perform(function() {
                                       else safe += ".";
                                  }
                                  console.log("   Arg["+i+"] (SafeView): " + safe);
-                                 try {
-                                    
-                                 }catch(e) {
-
-                                 }
                              }
                          } catch(e) { argStr = "[Object]"; }
                     }
@@ -553,51 +447,6 @@ Java.perform(function() {
         });
     } catch(e) { console.log("Hook f.l.a.m.i Error: " + e); }
 
-
-    // --- Volume Key Listener ---
-    try {
-        var Activity = Java.use("android.app.Activity");
-        var ClipboardManager = Java.use("android.content.ClipboardManager");
-        var ClipData = Java.use("android.content.ClipData");
-        var StringClass = Java.use("java.lang.String");
-        var Toast = Java.use("android.widget.Toast");
-
-        Activity.dispatchKeyEvent.implementation = function(event) {
-            if (event.getAction() === 0 && event.getKeyCode() === 24) { // Volume Up
-                try {
-                    var context = this;
-                    if (Object.keys(CaptureInfo).length === 0) {
-                        Toast.makeText(context, StringClass.$new("复制失败"), 0).show();
-                        return true;
-                    }
-                    CaptureInfo['appName'] = "MOBILE";
-                    CaptureInfo['deviceName'] = "Pixel 6a";
-                    CaptureInfo['version'] = "3.2.9";
-                    CaptureInfo['aesIV'] = "7f1b041c7586c6ba094c913725eeb039";
-                    CaptureInfo['UniqueDeviceId'] = CaptureInfo['clientDeviceID'];
-
-                    var jsonStr = JSON.stringify(CaptureInfo, null, 2);
-                    
-                    
-                    var cm = Java.cast(context.getSystemService("clipboard"), ClipboardManager);
-                    var label = StringClass.$new("Headers");
-                    var text = StringClass.$new(jsonStr);
-                    cm.setPrimaryClip(ClipData.newPlainText(label, text));
-
-                    // Toast: dispatchKeyEvent is ALREADY on UI thread, no need to schedule.
-                    try {
-                        Toast.makeText(context, StringClass.$new("Headers Copied!"), 0).show();
-                    } catch(eToast) {
-                        console.log("Toast failed (safe to ignore): " + eToast);
-                    }
-                    
-                    return true;
-                } catch(e) { console.log("Copy Error: " + e); }
-            }
-            return this.dispatchKeyEvent(event);
-        };
-        log("[+] Volume Up Copy Enabled");
-    } catch(e) { log("Key hook error: " + e); }
 });
 
 
@@ -684,4 +533,3 @@ function hookSSL() {
 }
 
 setTimeout(hookSSL, 1000);
-
