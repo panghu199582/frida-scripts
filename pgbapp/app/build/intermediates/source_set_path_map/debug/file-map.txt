@@ -1,0 +1,7 @@
+com.example.pgbankcapture.app-pngs-0 /Users/a996/projects/frida-scripts/pgbank_lsposed/app/build/generated/res/pngs/debug
+com.example.pgbankcapture.app-resValues-1 /Users/a996/projects/frida-scripts/pgbank_lsposed/app/build/generated/res/resValues/debug
+com.example.pgbankcapture.app-packageDebugResources-2 /Users/a996/projects/frida-scripts/pgbank_lsposed/app/build/intermediates/incremental/debug/packageDebugResources/merged.dir
+com.example.pgbankcapture.app-packageDebugResources-3 /Users/a996/projects/frida-scripts/pgbank_lsposed/app/build/intermediates/incremental/debug/packageDebugResources/stripped.dir
+com.example.pgbankcapture.app-merged_res-4 /Users/a996/projects/frida-scripts/pgbank_lsposed/app/build/intermediates/merged_res/debug
+com.example.pgbankcapture.app-debug-5 /Users/a996/projects/frida-scripts/pgbank_lsposed/app/src/debug/res
+com.example.pgbankcapture.app-main-6 /Users/a996/projects/frida-scripts/pgbank_lsposed/app/src/main/res

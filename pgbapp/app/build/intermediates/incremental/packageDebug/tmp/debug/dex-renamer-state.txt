@@ -1,0 +1,7 @@
+#Wed Jan 28 17:53:00 GMT+07:00 2026
+base.0=/Users/a996/projects/frida-scripts/pgbank_lsposed/app/build/intermediates/dex/debug/mergeProjectDexDebug/0/classes.dex
+base.1=/Users/a996/projects/frida-scripts/pgbank_lsposed/app/build/intermediates/dex/debug/mergeProjectDexDebug/1/classes.dex
+path.0=0/classes.dex
+path.1=1/classes.dex
+renamed.0=classes.dex
+renamed.1=classes2.dex
